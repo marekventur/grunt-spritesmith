@@ -77,6 +77,23 @@ module.exports = {
     // Finish the test
     test.done();
   },
+  'cached': function (test) {
+    // Load in the images
+    // TODO: If this were BDD, we should be loading this into a canvas and doing a threshold comparison there (i.e. are the images 90% similar)
+    var expectedCanvasImage = fs.readFileSync(__dirname + '/expected_files/canvas.png', 'binary'),
+        expectedGmImage = fs.readFileSync(__dirname + '/expected_files/gm.png', 'binary'),
+        actualImage = fs.readFileSync(__dirname + '/scratch/sprite.png', 'binary'),
+        matchesImage = expectedCanvasImage === actualImage || expectedGmImage === actualImage;
+
+    // Assert they are equal
+    test.ok(actualImage, 'Actual image does not match expected image');
+
+    // Make sure the outputs match
+    test.strictEqual(actualCoords, expectedCoords, 'Generated output doesn\'t match expected output.');
+
+    // Callback since we are done testing
+    test.done();
+  },
   // DEV: This is for testing an edge case -- don't let this strawman you in maintenance.
   'empty': function (test) {
     // Setup

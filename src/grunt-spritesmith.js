@@ -1,7 +1,7 @@
 var spritesmith = require('spritesmith'),
     json2css = require('json2css'),
     _ = require('underscore'),
-    fs = require('fs'),
+    fs = require('node-fs-extra'),
     path = require('path'),
     url = require('url2');
 
@@ -50,6 +50,7 @@ module.exports = function (grunt) {
         destImg = data.destImg,
         destCSS = data.destCSS,
         cssTemplate = data.cssTemplate,
+        cache = data.cache,
         that = this;
 
     // Verify all properties are here
@@ -70,7 +71,7 @@ module.exports = function (grunt) {
     // Set up the defautls for imgOpts
     _.defaults(imgOpts, {'format': imgFormat});
 
-    // Run through spritesmith
+    // Gather parameters for spritesmith
     var spritesmithParams = {
           'src': srcFiles,
           'engine': data.engine || 'auto',
@@ -79,86 +80,138 @@ module.exports = function (grunt) {
           'engineOpts': data.engineOpts || {},
           'exportOpts': imgOpts
         };
-    spritesmith(spritesmithParams, function (err, result) {
-      // If an error occurred, callback with it
-      if (err) {
-        grunt.fatal(err);
-        return cb(err);
-      }
 
-      // Otherwise, write out the result to destImg
-      var destImgDir = path.dirname(destImg);
-      grunt.file.mkdir(destImgDir);
-      fs.writeFileSync(destImg, result.image, 'binary');
+    // Check if a cached file can be used
+    var useCachedFiles = false,
+        cacheImgFilePath = null,
+        cacheCSSFilePath = null;
+    if (cache) {
+      var os = require('os'),
+          crypto = require('crypto');
 
-      // Generate a listing of CSS variables
-      var coordinates = result.coordinates,
-          properties = result.properties,
-          spritePath = data.imgPath || url.relative(destCSS, destImg),
-          cssVarMap = data.cssVarMap || function noop () {},
-          cleanCoords = [];
+      // Use special folder in OS temp dir
+      var cachePath = os.tmpdir() + '/grunt-spritesmith-cache';
+      fs.mkdirSync(cachePath);
 
-      // Clean up the file name of the file
-      Object.getOwnPropertyNames(coordinates).sort().forEach(function (file) {
-        // Extract the image name (exlcuding extension)
-        var fullname = path.basename(file),
-            nameParts = fullname.split('.');
+      // Generate key used for storing the cached data
+      // Contains both spritesmith parameters and a list of
+      // source files and their current size. A checksum
+      // would be a safer option, but takes a lot longer
+      // to compute.
+      var cacheKeyObject = {
+        spritesmithParams: spritesmithParams,
+        files: {}
+      };
+      _.each(srcFiles, function(filename) {
+        cacheKeyObject.files[filename] = fs.statSync(filename).size;
+      })
+      var shasum = crypto.createHash('sha1');
+      shasum.update(JSON.stringify(cacheKeyObject));
+      var cacheKey = shasum.digest('hex');
 
-        // If there is are more than 2 parts, pop the last one
-        if (nameParts.length >= 2) {
-          nameParts.pop();
+      // Check whether file already exists
+      cacheImgFilePath = cachePath + '/' + cacheKey + '.' + imgFormat;
+      cacheCSSFilePath = cachePath + '/' + cacheKey + '.css';
+      useCachedFiles = fs.existsSync(cacheImgFilePath) && fs.existsSync(cacheCSSFilePath);
+    }
+
+    console.log(useCachedFiles);
+
+    if (!useCachedFiles) {
+      // Run through spritesmith
+      spritesmith(spritesmithParams, function (err, result) {
+        // If an error occurred, callback with it
+        if (err) {
+          grunt.fatal(err);
+          return cb(err);
         }
 
-        // Extract out our name
-        var name = nameParts.join('.'),
-            coords = coordinates[file];
+        // Otherwise, write out the result to destImg
+        var destImgDir = path.dirname(destImg);
+        grunt.file.mkdir(destImgDir);
+        fs.writeFileSync(destImg, result.image, 'binary');
 
-        // Specify the image for the sprite
-        coords.name = name;
-        coords.source_image = file;
-        coords.image = spritePath;
-        coords.total_width = properties.width;
-        coords.total_height = properties.height;
+        // Generate a listing of CSS variables
+        var coordinates = result.coordinates,
+            properties = result.properties,
+            spritePath = data.imgPath || url.relative(destCSS, destImg),
+            cssVarMap = data.cssVarMap || function noop () {},
+            cleanCoords = [];
 
-        // Map the coordinates through cssVarMap
-        coords = cssVarMap(coords) || coords;
+        // Clean up the file name of the file
+        Object.getOwnPropertyNames(coordinates).sort().forEach(function (file) {
+          // Extract the image name (exlcuding extension)
+          var fullname = path.basename(file),
+              nameParts = fullname.split('.');
 
-        // Save the cleaned name and coordinates
-        cleanCoords.push(coords);
-      });
+          // If there is are more than 2 parts, pop the last one
+          if (nameParts.length >= 2) {
+            nameParts.pop();
+          }
 
-      var cssFormat = 'spritesmith-custom',
-          cssOptions = data.cssOpts || {};
+          // Extract out our name
+          var name = nameParts.join('.'),
+              coords = coordinates[file];
 
-      // If there's a custom template, use it
-      if (cssTemplate) {
-        if (typeof cssTemplate === 'function') {
-          json2css.addTemplate(cssFormat, cssTemplate);
+          // Specify the image for the sprite
+          coords.name = name;
+          coords.source_image = file;
+          coords.image = spritePath;
+          coords.total_width = properties.width;
+          coords.total_height = properties.height;
+
+          // Map the coordinates through cssVarMap
+          coords = cssVarMap(coords) || coords;
+
+          // Save the cleaned name and coordinates
+          cleanCoords.push(coords);
+        });
+
+        var cssFormat = 'spritesmith-custom',
+            cssOptions = data.cssOpts || {};
+
+        // If there's a custom template, use it
+        if (cssTemplate) {
+          if (typeof cssTemplate === 'function') {
+            json2css.addTemplate(cssFormat, cssTemplate);
+          } else {
+            json2css.addMustacheTemplate(cssFormat, fs.readFileSync(cssTemplate, 'utf8'));
+          }
         } else {
-          json2css.addMustacheTemplate(cssFormat, fs.readFileSync(cssTemplate, 'utf8'));
+        // Otherwise, override the cssFormat and fallback to 'json'
+          cssFormat = data.cssFormat || cssFormats.get(destCSS) || 'json';
         }
-      } else {
-      // Otherwise, override the cssFormat and fallback to 'json'
-        cssFormat = data.cssFormat || cssFormats.get(destCSS) || 'json';
-      }
 
-      // Render the variables via json2css
-      var cssStr = json2css(cleanCoords, {'format': cssFormat, 'formatOpts': cssOptions});
+        // Render the variables via json2css
+        var cssStr = json2css(cleanCoords, {'format': cssFormat, 'formatOpts': cssOptions});
 
-      // Write it out to the CSS file
-      var destCSSDir = path.dirname(destCSS);
-      grunt.file.mkdir(destCSSDir);
-      fs.writeFileSync(destCSS, cssStr, 'utf8');
+        // Write it out to the CSS file
+        var destCSSDir = path.dirname(destCSS);
+        grunt.file.mkdir(destCSSDir);
+        fs.writeFileSync(destCSS, cssStr, 'utf8');
 
-      // Fail task if errors were logged.
-      if (that.errorCount) { cb(false); }
+        // Fail task if errors were logged.
+        if (that.errorCount) { cb(false); }
 
-      // Otherwise, print a success message.
-      grunt.log.writeln('Files "' + destCSS + '", "' + destImg + '" created.');
+        // Otherwise, print a success message.
+        grunt.log.writeln('Files "' + destCSS + '", "' + destImg + '" created.');
 
-      // Callback
+        // Cache the generated files
+        if (cacheImgFilePath && cacheCSSFilePath) {
+          fs.copySync(destImg, cacheImgFilePath);
+          fs.copySync(destCSS, cacheCSSFilePath);
+        }
+
+        // Callback
+        cb(true);
+      });
+    } else {
+      // File already exists as cached file, copy to destination
+      fs.copySync(cacheImgFilePath, destImg);
+      fs.copySync(cacheCSSFilePath, destCSS);
+
       cb(true);
-    });
+    }
   }
 
   // Export the SpriteMaker function
